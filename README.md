@@ -77,8 +77,8 @@ That's it. Your generated project is in `output/`.
 ### Build from Source
 
 ```bash
-git clone <repo-url>
-cd battlecommand-forge
+git clone https://github.com/mrdushidush/battle-command-forge.git
+cd battle-command-forge
 cargo build --release
 ```
 
@@ -124,7 +124,7 @@ battlecommand-forge status
 ```
 
 ```
-BattleCommand Forge v1.0.0
+BattleCommand Forge v0.1.0
 Modules: 30 | Pipeline: 9-stage | Gate: 8.0-9.2/10 (scaled) | Fix rounds: 5
 
 Ollama: connected (12 models)
