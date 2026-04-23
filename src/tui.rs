@@ -637,49 +637,211 @@ pub async fn run_tui() -> Result<()> {
 
                 if app.current_tab == Tab::Chat {
                     match key.code {
-                        KeyCode::Enter
-                            if !app.input.is_empty() && !app.is_generating => {
-                                let msg = app.input.clone();
-                                app.input.clear();
-                                app.input_cursor = 0;
-                                app.chat_auto_scroll = true;
-                                app.chat_scroll = 0;
+                        KeyCode::Enter if !app.input.is_empty() && !app.is_generating => {
+                            let msg = app.input.clone();
+                            app.input.clear();
+                            app.input_cursor = 0;
+                            app.chat_auto_scroll = true;
+                            app.chat_scroll = 0;
 
-                                // ── Slash commands ──
-                                if msg == "/snake" {
-                                    app.snake_game = Some(SnakeGame::new());
-                                    continue;
-                                } else if msg == "/space" {
-                                    app.space_game = Some(SpaceGame::new());
-                                    continue;
-                                } else if msg == "/status" {
-                                    let ws =
-                                        crate::workspace::list_workspaces().unwrap_or_default();
+                            // ── Slash commands ──
+                            if msg == "/snake" {
+                                app.snake_game = Some(SnakeGame::new());
+                                continue;
+                            } else if msg == "/space" {
+                                app.space_game = Some(SpaceGame::new());
+                                continue;
+                            } else if msg == "/status" {
+                                let ws = crate::workspace::list_workspaces().unwrap_or_default();
+                                app.chat_messages.push((
+                                    "system".into(),
+                                    format!("Workspaces: {} | Modules: 30", ws.len()),
+                                ));
+                                continue;
+                            } else if msg == "/models" {
+                                app.current_tab = Tab::Models;
+                                continue;
+                            } else if msg == "/hw" {
+                                app.current_tab = Tab::Hw;
+                                continue;
+                            } else if msg == "/settings" {
+                                match crate::models::list_ollama_models().await {
+                                    Ok(models) => {
+                                        let available = to_available_models(&models);
+                                        if available.is_empty() {
+                                            app.chat_messages.push((
+                                                "system".into(),
+                                                "No models available. Is Ollama running?".into(),
+                                            ));
+                                        } else {
+                                            app.picker_state = Some(ModelPickerState::new(
+                                                available,
+                                                &app.model_config,
+                                            ));
+                                        }
+                                    }
+                                    Err(e) => app
+                                        .chat_messages
+                                        .push(("error".into(), format!("Failed: {}", e))),
+                                }
+                                continue;
+                            } else if msg == "/clear" {
+                                app.chat_messages.clear();
+                                app.chat_messages
+                                    .push(("system".into(), "Chat cleared.".into()));
+                                app.thinking_buffer.clear();
+                                if let Some(ref mut agent) = app.cto_agent {
+                                    agent.clear_history();
+                                    agent.save_history().ok();
+                                }
+                                continue;
+                            } else if msg == "/compress" {
+                                if let Some(ref mut agent) = app.cto_agent {
+                                    agent.compact_history();
+                                    agent.save_history().ok();
                                     app.chat_messages.push((
                                         "system".into(),
-                                        format!("Workspaces: {} | Modules: 30", ws.len()),
+                                        format!(
+                                            "History compacted to {} messages",
+                                            agent.history_len()
+                                        ),
+                                    ));
+                                } else {
+                                    app.chat_messages
+                                        .push(("system".into(), "No active CTO session.".into()));
+                                }
+                                continue;
+                            } else if msg.starts_with("/mission ") {
+                                // Duplicate mission guard
+                                if app.mission_running {
+                                    app.chat_messages.push((
+                                        "system".into(),
+                                        "A mission is already running. Wait for it to complete."
+                                            .into(),
                                     ));
                                     continue;
-                                } else if msg == "/models" {
-                                    app.current_tab = Tab::Models;
-                                    continue;
-                                } else if msg == "/hw" {
-                                    app.current_tab = Tab::Hw;
-                                    continue;
-                                } else if msg == "/settings" {
-                                    match crate::models::list_ollama_models().await {
-                                        Ok(models) => {
-                                            let available = to_available_models(&models);
-                                            if available.is_empty() {
+                                }
+                                let prompt = msg.strip_prefix("/mission ").unwrap_or("").trim();
+                                if !prompt.is_empty() {
+                                    app.mission_running = true;
+                                    app.status_line = "MISSION RUNNING...".into();
+                                    app.chat_messages.push((
+                                        "system".into(),
+                                        format!("Mission launched: {}", prompt),
+                                    ));
+                                    app.queue_items.clear();
+                                    app.code_content.clear();
+                                    app.code_display_len = 0;
+                                    let config = app.model_config.clone();
+                                    let p = prompt.to_string();
+                                    let etx = app.mission_event_tx.clone();
+                                    tokio::spawn(async move {
+                                        let mut runner = crate::mission::MissionRunner::new(config);
+                                        runner.auto_mode = true;
+                                        runner.event_tx = Some(etx.clone());
+                                        if let Err(e) = runner.run(&p).await {
+                                            let _ = etx.send(TuiEvent::MissionFailed {
+                                                error: e.to_string(),
+                                            });
+                                        }
+                                    });
+                                } else {
+                                    app.chat_messages
+                                        .push(("system".into(), "Usage: /mission <prompt>".into()));
+                                }
+                                continue;
+                            } else if msg.starts_with("/verify") {
+                                let arg = msg.strip_prefix("/verify").unwrap_or("").trim();
+                                let path = if arg.is_empty() {
+                                    // Find most recent output directory
+                                    let mut best: Option<std::path::PathBuf> = None;
+                                    if let Ok(entries) = std::fs::read_dir("output") {
+                                        for entry in entries.flatten() {
+                                            let p = entry.path();
+                                            if p.is_dir()
+                                                && best.as_ref().is_none_or(|b| {
+                                                    p.metadata()
+                                                        .and_then(|m| m.modified())
+                                                        .unwrap_or(
+                                                            std::time::SystemTime::UNIX_EPOCH,
+                                                        )
+                                                        > b.metadata()
+                                                            .and_then(|m| m.modified())
+                                                            .unwrap_or(
+                                                                std::time::SystemTime::UNIX_EPOCH,
+                                                            )
+                                                })
+                                            {
+                                                best = Some(p);
+                                            }
+                                        }
+                                    }
+                                    best
+                                } else {
+                                    Some(std::path::PathBuf::from(arg))
+                                };
+                                match path {
+                                    Some(dir) if dir.exists() => {
+                                        app.chat_messages.push((
+                                            "system".into(),
+                                            format!("Verifying {}...", dir.display()),
+                                        ));
+                                        match crate::verifier::verify_project(&dir, "python") {
+                                            Ok(report) => {
+                                                app.chat_messages.push(("system".into(), format!(
+                                                        "Score: {:.1}/10 | Tests: {} passed, {} failed | Files: {}",
+                                                        report.avg_score, report.tests_passed, report.tests_failed,
+                                                        report.file_reports.len()
+                                                    )));
+                                                if !report.test_errors.is_empty() {
+                                                    let errors: String = report
+                                                        .test_errors
+                                                        .iter()
+                                                        .take(5)
+                                                        .map(|e| format!("  {}", e))
+                                                        .collect::<Vec<_>>()
+                                                        .join("\n");
+                                                    app.chat_messages.push((
+                                                        "error".into(),
+                                                        format!("Errors:\n{}", errors),
+                                                    ));
+                                                }
+                                            }
+                                            Err(e) => app.chat_messages.push((
+                                                "error".into(),
+                                                format!("Verify failed: {}", e),
+                                            )),
+                                        }
+                                    }
+                                    Some(dir) => app.chat_messages.push((
+                                        "error".into(),
+                                        format!("Not found: {}", dir.display()),
+                                    )),
+                                    None => app.chat_messages.push((
+                                        "system".into(),
+                                        "No output directory found. Usage: /verify [path]".into(),
+                                    )),
+                                }
+                                continue;
+                            } else if msg.starts_with("/report") {
+                                let arg = msg.strip_prefix("/report").unwrap_or("").trim();
+                                if arg == "list" || arg.is_empty() {
+                                    match crate::report::list_reports() {
+                                        Ok(reports) if reports.is_empty() => {
+                                            app.chat_messages.push((
+                                                "system".into(),
+                                                "No reports yet. Run a mission first.".into(),
+                                            ));
+                                        }
+                                        Ok(reports) => {
+                                            app.chat_messages.push((
+                                                "system".into(),
+                                                format!("{} reports:", reports.len()),
+                                            ));
+                                            for r in reports.iter().rev().take(10) {
                                                 app.chat_messages.push((
                                                     "system".into(),
-                                                    "No models available. Is Ollama running?"
-                                                        .into(),
-                                                ));
-                                            } else {
-                                                app.picker_state = Some(ModelPickerState::new(
-                                                    available,
-                                                    &app.model_config,
+                                                    format!("  {}", r.display()),
                                                 ));
                                             }
                                         }
@@ -687,427 +849,253 @@ pub async fn run_tui() -> Result<()> {
                                             .chat_messages
                                             .push(("error".into(), format!("Failed: {}", e))),
                                     }
-                                    continue;
-                                } else if msg == "/clear" {
-                                    app.chat_messages.clear();
-                                    app.chat_messages
-                                        .push(("system".into(), "Chat cleared.".into()));
-                                    app.thinking_buffer.clear();
-                                    if let Some(ref mut agent) = app.cto_agent {
-                                        agent.clear_history();
-                                        agent.save_history().ok();
-                                    }
-                                    continue;
-                                } else if msg == "/compress" {
-                                    if let Some(ref mut agent) = app.cto_agent {
-                                        agent.compact_history();
-                                        agent.save_history().ok();
-                                        app.chat_messages.push((
-                                            "system".into(),
-                                            format!(
-                                                "History compacted to {} messages",
-                                                agent.history_len()
-                                            ),
-                                        ));
+                                } else {
+                                    // /report show [path]
+                                    let report_path = if arg == "show" {
+                                        std::path::PathBuf::from(
+                                            ".battlecommand/reports/latest.json",
+                                        )
                                     } else {
-                                        app.chat_messages.push((
-                                            "system".into(),
-                                            "No active CTO session.".into(),
-                                        ));
-                                    }
-                                    continue;
-                                } else if msg.starts_with("/mission ") {
-                                    // Duplicate mission guard
-                                    if app.mission_running {
-                                        app.chat_messages.push(("system".into(), "A mission is already running. Wait for it to complete.".into()));
-                                        continue;
-                                    }
-                                    let prompt = msg.strip_prefix("/mission ").unwrap_or("").trim();
-                                    if !prompt.is_empty() {
-                                        app.mission_running = true;
-                                        app.status_line = "MISSION RUNNING...".into();
-                                        app.chat_messages.push((
-                                            "system".into(),
-                                            format!("Mission launched: {}", prompt),
-                                        ));
-                                        app.queue_items.clear();
-                                        app.code_content.clear();
-                                        app.code_display_len = 0;
-                                        let config = app.model_config.clone();
-                                        let p = prompt.to_string();
-                                        let etx = app.mission_event_tx.clone();
-                                        tokio::spawn(async move {
-                                            let mut runner =
-                                                crate::mission::MissionRunner::new(config);
-                                            runner.auto_mode = true;
-                                            runner.event_tx = Some(etx.clone());
-                                            if let Err(e) = runner.run(&p).await {
-                                                let _ = etx.send(TuiEvent::MissionFailed {
-                                                    error: e.to_string(),
-                                                });
-                                            }
-                                        });
-                                    } else {
-                                        app.chat_messages.push((
-                                            "system".into(),
-                                            "Usage: /mission <prompt>".into(),
-                                        ));
-                                    }
-                                    continue;
-                                } else if msg.starts_with("/verify") {
-                                    let arg = msg.strip_prefix("/verify").unwrap_or("").trim();
-                                    let path = if arg.is_empty() {
-                                        // Find most recent output directory
-                                        let mut best: Option<std::path::PathBuf> = None;
-                                        if let Ok(entries) = std::fs::read_dir("output") {
-                                            for entry in entries.flatten() {
-                                                let p = entry.path();
-                                                if p.is_dir()
-                                                    && best.as_ref().is_none_or(|b| {
-                                                        p.metadata().and_then(|m| m.modified()).unwrap_or(std::time::SystemTime::UNIX_EPOCH)
-                                                            > b.metadata().and_then(|m| m.modified()).unwrap_or(std::time::SystemTime::UNIX_EPOCH)
-                                                    }) {
-                                                        best = Some(p);
-                                                    }
-                                            }
-                                        }
-                                        best
-                                    } else {
-                                        Some(std::path::PathBuf::from(arg))
+                                        let p = arg.strip_prefix("show ").unwrap_or(arg);
+                                        std::path::PathBuf::from(p)
                                     };
-                                    match path {
-                                        Some(dir) if dir.exists() => {
-                                            app.chat_messages.push((
-                                                "system".into(),
-                                                format!("Verifying {}...", dir.display()),
-                                            ));
-                                            match crate::verifier::verify_project(&dir, "python") {
-                                                Ok(report) => {
-                                                    app.chat_messages.push(("system".into(), format!(
-                                                        "Score: {:.1}/10 | Tests: {} passed, {} failed | Files: {}",
-                                                        report.avg_score, report.tests_passed, report.tests_failed,
-                                                        report.file_reports.len()
-                                                    )));
-                                                    if !report.test_errors.is_empty() {
-                                                        let errors: String = report
-                                                            .test_errors
-                                                            .iter()
-                                                            .take(5)
-                                                            .map(|e| format!("  {}", e))
-                                                            .collect::<Vec<_>>()
-                                                            .join("\n");
-                                                        app.chat_messages.push((
-                                                            "error".into(),
-                                                            format!("Errors:\n{}", errors),
-                                                        ));
-                                                    }
-                                                }
-                                                Err(e) => app.chat_messages.push((
-                                                    "error".into(),
-                                                    format!("Verify failed: {}", e),
-                                                )),
-                                            }
-                                        }
-                                        Some(dir) => app.chat_messages.push((
+                                    if !report_path.exists() {
+                                        app.chat_messages.push((
                                             "error".into(),
-                                            format!("Not found: {}", dir.display()),
-                                        )),
-                                        None => app.chat_messages.push((
-                                            "system".into(),
-                                            "No output directory found. Usage: /verify [path]"
-                                                .into(),
-                                        )),
-                                    }
-                                    continue;
-                                } else if msg.starts_with("/report") {
-                                    let arg = msg.strip_prefix("/report").unwrap_or("").trim();
-                                    if arg == "list" || arg.is_empty() {
-                                        match crate::report::list_reports() {
-                                            Ok(reports) if reports.is_empty() => {
-                                                app.chat_messages.push((
-                                                    "system".into(),
-                                                    "No reports yet. Run a mission first.".into(),
-                                                ));
-                                            }
-                                            Ok(reports) => {
-                                                app.chat_messages.push((
-                                                    "system".into(),
-                                                    format!("{} reports:", reports.len()),
-                                                ));
-                                                for r in reports.iter().rev().take(10) {
-                                                    app.chat_messages.push((
-                                                        "system".into(),
-                                                        format!("  {}", r.display()),
-                                                    ));
-                                                }
-                                            }
-                                            Err(e) => app
-                                                .chat_messages
-                                                .push(("error".into(), format!("Failed: {}", e))),
-                                        }
+                                            format!("Report not found: {}", report_path.display()),
+                                        ));
                                     } else {
-                                        // /report show [path]
-                                        let report_path = if arg == "show" {
-                                            std::path::PathBuf::from(
-                                                ".battlecommand/reports/latest.json",
-                                            )
-                                        } else {
-                                            let p = arg.strip_prefix("show ").unwrap_or(arg);
-                                            std::path::PathBuf::from(p)
-                                        };
-                                        if !report_path.exists() {
-                                            app.chat_messages.push((
-                                                "error".into(),
-                                                format!(
-                                                    "Report not found: {}",
-                                                    report_path.display()
-                                                ),
-                                            ));
-                                        } else {
-                                            match crate::report::load_report(&report_path) {
-                                                Ok(report) => {
-                                                    app.chat_messages.push(("system".into(), format!(
+                                        match crate::report::load_report(&report_path) {
+                                            Ok(report) => {
+                                                app.chat_messages.push(("system".into(), format!(
                                                         "Mission: {} | Score: {:.1} | Rounds: {} | {}",
                                                         report.mission.prompt.chars().take(50).collect::<String>(),
                                                         report.result.best_score,
                                                         report.result.total_rounds,
                                                         if report.result.quality_gate_passed { "SHIPPED" } else { "NOT SHIPPED" }
                                                     )));
-                                                    if let Some(best) =
-                                                        report.rounds.iter().max_by(|a, b| {
-                                                            a.final_score
-                                                                .partial_cmp(&b.final_score)
-                                                                .unwrap_or(
-                                                                    std::cmp::Ordering::Equal,
-                                                                )
-                                                        })
-                                                    {
-                                                        let s = &best.critique.scores;
-                                                        app.chat_messages.push(("system".into(), format!(
+                                                if let Some(best) =
+                                                    report.rounds.iter().max_by(|a, b| {
+                                                        a.final_score
+                                                            .partial_cmp(&b.final_score)
+                                                            .unwrap_or(std::cmp::Ordering::Equal)
+                                                    })
+                                                {
+                                                    let s = &best.critique.scores;
+                                                    app.chat_messages.push(("system".into(), format!(
                                                             "Critique: DEV={:.1} ARCH={:.1} TEST={:.1} SEC={:.1} DOCS={:.1}",
                                                             s.dev, s.arch, s.test, s.sec, s.docs
                                                         )));
-                                                    }
                                                 }
-                                                Err(e) => app.chat_messages.push((
-                                                    "error".into(),
-                                                    format!("Failed: {}", e),
-                                                )),
                                             }
+                                            Err(e) => app
+                                                .chat_messages
+                                                .push(("error".into(), format!("Failed: {}", e))),
                                         }
                                     }
-                                    continue;
-                                } else if msg.starts_with("/audit") {
-                                    let arg = msg.strip_prefix("/audit").unwrap_or("").trim();
-                                    let limit: usize = arg.parse().unwrap_or(10);
-                                    match crate::enterprise::read_audit_log(limit) {
-                                        Ok(entries) if entries.is_empty() => {
-                                            app.chat_messages.push((
-                                                "system".into(),
-                                                "No audit entries.".into(),
-                                            ));
-                                        }
-                                        Ok(entries) => {
-                                            app.chat_messages.push((
-                                                "system".into(),
-                                                format!("Last {} audit entries:", entries.len()),
-                                            ));
-                                            for e in &entries {
-                                                app.chat_messages.push((
-                                                    "system".into(),
-                                                    format!(
-                                                        "[{}] {} {} — {}",
-                                                        e.timestamp, e.actor, e.action, e.resource
-                                                    ),
-                                                ));
-                                            }
-                                        }
-                                        Err(e) => app
-                                            .chat_messages
-                                            .push(("error".into(), format!("Failed: {}", e))),
+                                }
+                                continue;
+                            } else if msg.starts_with("/audit") {
+                                let arg = msg.strip_prefix("/audit").unwrap_or("").trim();
+                                let limit: usize = arg.parse().unwrap_or(10);
+                                match crate::enterprise::read_audit_log(limit) {
+                                    Ok(entries) if entries.is_empty() => {
+                                        app.chat_messages
+                                            .push(("system".into(), "No audit entries.".into()));
                                     }
-                                    continue;
-                                } else if msg.starts_with("/preset") {
-                                    let arg = msg.strip_prefix("/preset").unwrap_or("").trim();
-                                    match arg {
-                                        "fast" | "balanced" | "premium" => {
-                                            let preset_enum = arg
-                                                .parse::<crate::model_config::Preset>()
-                                                .unwrap_or(crate::model_config::Preset::Premium);
-                                            app.model_config =
-                                                crate::model_config::ModelConfig::resolve(
-                                                    preset_enum,
-                                                    ".",
-                                                    None,
-                                                    None,
-                                                    None,
-                                                    None,
-                                                );
-                                            app.chat_messages.push((
-                                                "system".into(),
-                                                format!("Switched to {} preset", arg),
-                                            ));
+                                    Ok(entries) => {
+                                        app.chat_messages.push((
+                                            "system".into(),
+                                            format!("Last {} audit entries:", entries.len()),
+                                        ));
+                                        for e in &entries {
                                             app.chat_messages.push((
                                                 "system".into(),
                                                 format!(
-                                                    "  Architect: {} | Coder: {} | CTO: {}",
-                                                    app.model_config.architect.model,
-                                                    app.model_config.coder.model,
-                                                    app.model_config.cto.model,
+                                                    "[{}] {} {} — {}",
+                                                    e.timestamp, e.actor, e.action, e.resource
                                                 ),
                                             ));
-                                            app.log("info", format!("Preset: {}", arg));
-                                        }
-                                        _ => {
-                                            app.chat_messages.push((
-                                                "system".into(),
-                                                "Usage: /preset <fast|balanced|premium>".into(),
-                                            ));
                                         }
                                     }
-                                    continue;
-                                } else if msg == "/cost" {
-                                    match crate::enterprise::total_cost() {
-                                        Ok(cost) => {
-                                            app.chat_messages.push((
-                                                "system".into(),
-                                                format!("Total API cost: ${:.4}", cost),
-                                            ));
-                                        }
-                                        Err(e) => app
-                                            .chat_messages
-                                            .push(("error".into(), format!("Failed: {}", e))),
-                                    }
-                                    continue;
-                                } else if msg == "/help" {
-                                    app.chat_messages
-                                        .push(("system".into(), "── Commands ──".into()));
-                                    app.chat_messages.push((
-                                        "system".into(),
-                                        "/mission <prompt> — Launch a mission".into(),
-                                    ));
-                                    app.chat_messages.push((
-                                        "system".into(),
-                                        "/verify [path]   — Run verifier (default: latest output)"
-                                            .into(),
-                                    ));
-                                    app.chat_messages.push((
-                                        "system".into(),
-                                        "/report [list|show] — View pipeline reports".into(),
-                                    ));
-                                    app.chat_messages.push((
-                                        "system".into(),
-                                        "/audit [n]       — Show audit log (default: 10)".into(),
-                                    ));
-                                    app.chat_messages.push((
-                                        "system".into(),
-                                        "/preset <name>   — Switch preset (fast/balanced/premium)"
-                                            .into(),
-                                    ));
-                                    app.chat_messages.push((
-                                        "system".into(),
-                                        "/cost            — Show total API cost".into(),
-                                    ));
-                                    app.chat_messages.push((
-                                        "system".into(),
-                                        "/settings        — Model picker".into(),
-                                    ));
-                                    app.chat_messages.push((
-                                        "system".into(),
-                                        "/clear           — Clear chat + CTO history".into(),
-                                    ));
-                                    app.chat_messages.push((
-                                        "system".into(),
-                                        "/compress        — Compact CTO history".into(),
-                                    ));
-                                    app.chat_messages.push((
-                                        "system".into(),
-                                        "/models /hw /status — Switch tabs / info".into(),
-                                    ));
-                                    app.chat_messages.push((
-                                        "system".into(),
-                                        "Or type any message to chat with CTO".into(),
-                                    ));
-                                    continue;
+                                    Err(e) => app
+                                        .chat_messages
+                                        .push(("error".into(), format!("Failed: {}", e))),
                                 }
+                                continue;
+                            } else if msg.starts_with("/preset") {
+                                let arg = msg.strip_prefix("/preset").unwrap_or("").trim();
+                                match arg {
+                                    "fast" | "balanced" | "premium" => {
+                                        let preset_enum = arg
+                                            .parse::<crate::model_config::Preset>()
+                                            .unwrap_or(crate::model_config::Preset::Premium);
+                                        app.model_config =
+                                            crate::model_config::ModelConfig::resolve(
+                                                preset_enum,
+                                                ".",
+                                                None,
+                                                None,
+                                                None,
+                                                None,
+                                            );
+                                        app.chat_messages.push((
+                                            "system".into(),
+                                            format!("Switched to {} preset", arg),
+                                        ));
+                                        app.chat_messages.push((
+                                            "system".into(),
+                                            format!(
+                                                "  Architect: {} | Coder: {} | CTO: {}",
+                                                app.model_config.architect.model,
+                                                app.model_config.coder.model,
+                                                app.model_config.cto.model,
+                                            ),
+                                        ));
+                                        app.log("info", format!("Preset: {}", arg));
+                                    }
+                                    _ => {
+                                        app.chat_messages.push((
+                                            "system".into(),
+                                            "Usage: /preset <fast|balanced|premium>".into(),
+                                        ));
+                                    }
+                                }
+                                continue;
+                            } else if msg == "/cost" {
+                                match crate::enterprise::total_cost() {
+                                    Ok(cost) => {
+                                        app.chat_messages.push((
+                                            "system".into(),
+                                            format!("Total API cost: ${:.4}", cost),
+                                        ));
+                                    }
+                                    Err(e) => app
+                                        .chat_messages
+                                        .push(("error".into(), format!("Failed: {}", e))),
+                                }
+                                continue;
+                            } else if msg == "/help" {
+                                app.chat_messages
+                                    .push(("system".into(), "── Commands ──".into()));
+                                app.chat_messages.push((
+                                    "system".into(),
+                                    "/mission <prompt> — Launch a mission".into(),
+                                ));
+                                app.chat_messages.push((
+                                    "system".into(),
+                                    "/verify [path]   — Run verifier (default: latest output)"
+                                        .into(),
+                                ));
+                                app.chat_messages.push((
+                                    "system".into(),
+                                    "/report [list|show] — View pipeline reports".into(),
+                                ));
+                                app.chat_messages.push((
+                                    "system".into(),
+                                    "/audit [n]       — Show audit log (default: 10)".into(),
+                                ));
+                                app.chat_messages.push((
+                                    "system".into(),
+                                    "/preset <name>   — Switch preset (fast/balanced/premium)"
+                                        .into(),
+                                ));
+                                app.chat_messages.push((
+                                    "system".into(),
+                                    "/cost            — Show total API cost".into(),
+                                ));
+                                app.chat_messages.push((
+                                    "system".into(),
+                                    "/settings        — Model picker".into(),
+                                ));
+                                app.chat_messages.push((
+                                    "system".into(),
+                                    "/clear           — Clear chat + CTO history".into(),
+                                ));
+                                app.chat_messages.push((
+                                    "system".into(),
+                                    "/compress        — Compact CTO history".into(),
+                                ));
+                                app.chat_messages.push((
+                                    "system".into(),
+                                    "/models /hw /status — Switch tabs / info".into(),
+                                ));
+                                app.chat_messages.push((
+                                    "system".into(),
+                                    "Or type any message to chat with CTO".into(),
+                                ));
+                                continue;
+                            }
 
-                                // ── Regular chat → CTO agent ──
-                                app.chat_messages.push(("you".into(), msg.clone()));
+                            // ── Regular chat → CTO agent ──
+                            app.chat_messages.push(("you".into(), msg.clone()));
+                            app.log(
+                                "info",
+                                format!("Prompt: {}", &msg.chars().take(50).collect::<String>()),
+                            );
+
+                            // Initialize CTO agent on first use
+                            if app.cto_agent.is_none() {
+                                let cto_model = &app.model_config.cto.model;
+                                let llm = LlmClient::with_limits(
+                                    cto_model,
+                                    app.model_config.cto.context_size(),
+                                    app.model_config.cto.max_predict(),
+                                );
+                                let mut agent = crate::cto::CtoAgent::new(llm);
+                                agent.set_model_config(app.model_config.clone());
+                                agent.set_tui_event_tx(app.mission_event_tx.clone());
+                                agent.load_history().ok();
+                                app.cto_agent = Some(agent);
                                 app.log(
                                     "info",
                                     format!(
-                                        "Prompt: {}",
-                                        &msg.chars().take(50).collect::<String>()
+                                        "CTO agent initialized ({})",
+                                        app.model_config.cto.model
                                     ),
                                 );
+                            }
 
-                                // Initialize CTO agent on first use
-                                if app.cto_agent.is_none() {
-                                    let cto_model = &app.model_config.cto.model;
-                                    let llm = LlmClient::with_limits(
-                                        cto_model,
-                                        app.model_config.cto.context_size(),
-                                        app.model_config.cto.max_predict(),
-                                    );
-                                    let mut agent = crate::cto::CtoAgent::new(llm);
-                                    agent.set_model_config(app.model_config.clone());
-                                    agent.set_tui_event_tx(app.mission_event_tx.clone());
-                                    agent.load_history().ok();
-                                    app.cto_agent = Some(agent);
-                                    app.log(
-                                        "info",
-                                        format!(
-                                            "CTO agent initialized ({})",
-                                            app.model_config.cto.model
-                                        ),
-                                    );
-                                }
+                            let (tx, rx) = mpsc::channel(512);
+                            app.stream_rx = Some(rx);
+                            app.is_generating = true;
+                            app.stream_buffer.clear();
+                            app.status_line =
+                                format!("CTO STREAMING [{}]...", app.model_config.cto.model);
 
-                                let (tx, rx) = mpsc::channel(512);
-                                app.stream_rx = Some(rx);
-                                app.is_generating = true;
-                                app.stream_buffer.clear();
-                                app.status_line =
-                                    format!("CTO STREAMING [{}]...", app.model_config.cto.model);
-
-                                // Take agent, spawn async task, return via channel
-                                let mut agent = app.cto_agent.take().unwrap();
-                                let tx_clone = tx.clone();
-                                tokio::spawn(async move {
-                                    agent.set_event_tx(tx_clone.clone());
-                                    match agent.chat(&msg).await {
-                                        Ok(response) => {
-                                            let _ =
-                                                tx_clone.send(StreamEvent::Done(response)).await;
-                                        }
-                                        Err(e) => {
-                                            let _ = tx_clone
-                                                .send(StreamEvent::Error(e.to_string()))
-                                                .await;
-                                        }
+                            // Take agent, spawn async task, return via channel
+                            let mut agent = app.cto_agent.take().unwrap();
+                            let tx_clone = tx.clone();
+                            tokio::spawn(async move {
+                                agent.set_event_tx(tx_clone.clone());
+                                match agent.chat(&msg).await {
+                                    Ok(response) => {
+                                        let _ = tx_clone.send(StreamEvent::Done(response)).await;
                                     }
-                                    let _ = tx_clone
-                                        .send(StreamEvent::AgentReturn(Box::new(agent)))
-                                        .await;
-                                });
-                            }
+                                    Err(e) => {
+                                        let _ =
+                                            tx_clone.send(StreamEvent::Error(e.to_string())).await;
+                                    }
+                                }
+                                let _ = tx_clone
+                                    .send(StreamEvent::AgentReturn(Box::new(agent)))
+                                    .await;
+                            });
+                        }
                         // ── Input cursor movement ──
-                        KeyCode::Backspace
-                            if app.input_cursor > 0 => {
-                                app.input.remove(app.input_cursor - 1);
-                                app.input_cursor -= 1;
-                            }
-                        KeyCode::Delete
-                            if app.input_cursor < app.input.len() => {
-                                app.input.remove(app.input_cursor);
-                            }
+                        KeyCode::Backspace if app.input_cursor > 0 => {
+                            app.input.remove(app.input_cursor - 1);
+                            app.input_cursor -= 1;
+                        }
+                        KeyCode::Delete if app.input_cursor < app.input.len() => {
+                            app.input.remove(app.input_cursor);
+                        }
                         KeyCode::Left => {
                             app.input_cursor = app.input_cursor.saturating_sub(1);
                         }
-                        KeyCode::Right
-                            if app.input_cursor < app.input.len() => {
-                                app.input_cursor += 1;
-                            }
+                        KeyCode::Right if app.input_cursor < app.input.len() => {
+                            app.input_cursor += 1;
+                        }
                         KeyCode::Home => {
                             if app.input.is_empty() {
                                 app.chat_auto_scroll = false;
@@ -1137,20 +1125,18 @@ pub async fn run_tui() -> Result<()> {
                                 app.chat_auto_scroll = true;
                             }
                         }
-                        KeyCode::Up
-                            if app.input.is_empty() => {
-                                app.chat_auto_scroll = false;
-                                app.chat_scroll = app.chat_scroll.saturating_add(3);
+                        KeyCode::Up if app.input.is_empty() => {
+                            app.chat_auto_scroll = false;
+                            app.chat_scroll = app.chat_scroll.saturating_add(3);
+                        }
+                        KeyCode::Down if app.input.is_empty() => {
+                            if app.chat_scroll >= 3 {
+                                app.chat_scroll -= 3;
+                            } else {
+                                app.chat_scroll = 0;
+                                app.chat_auto_scroll = true;
                             }
-                        KeyCode::Down
-                            if app.input.is_empty() => {
-                                if app.chat_scroll >= 3 {
-                                    app.chat_scroll -= 3;
-                                } else {
-                                    app.chat_scroll = 0;
-                                    app.chat_auto_scroll = true;
-                                }
-                            }
+                        }
                         KeyCode::Esc => {
                             if app.input.is_empty() {
                                 app.should_quit = true;

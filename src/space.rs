@@ -248,23 +248,20 @@ impl SpaceGame {
                 self.stop_music();
                 return true;
             }
-            KeyCode::Left | KeyCode::Char('a')
-                if self.player_x > 1 => {
-                    self.player_x -= 1;
-                }
-            KeyCode::Right | KeyCode::Char('d')
-                if self.player_x < GRID_W - 2 => {
-                    self.player_x += 1;
-                }
-            KeyCode::Char(' ') | KeyCode::Up
-                if self.alive && self.shoot_cooldown == 0 => {
-                    self.bullets.push(Bullet {
-                        x: self.player_x,
-                        y: PLAYER_Y as i16 - 1,
-                        direction: -1,
-                    });
-                    self.shoot_cooldown = 4;
-                }
+            KeyCode::Left | KeyCode::Char('a') if self.player_x > 1 => {
+                self.player_x -= 1;
+            }
+            KeyCode::Right | KeyCode::Char('d') if self.player_x < GRID_W - 2 => {
+                self.player_x += 1;
+            }
+            KeyCode::Char(' ') | KeyCode::Up if self.alive && self.shoot_cooldown == 0 => {
+                self.bullets.push(Bullet {
+                    x: self.player_x,
+                    y: PLAYER_Y as i16 - 1,
+                    direction: -1,
+                });
+                self.shoot_cooldown = 4;
+            }
             KeyCode::Enter if self.game_over => {
                 let hs = self.high_score.max(self.score);
                 *self = SpaceGame::new();

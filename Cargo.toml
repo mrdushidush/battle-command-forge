@@ -10,7 +10,7 @@ homepage = "https://github.com/mrdushidush/battle-command-forge"
 readme = "README.md"
 keywords = ["ai", "codegen", "ollama", "llm", "cli"]
 categories = ["command-line-utilities", "development-tools"]
-rust-version = "1.75"
+rust-version = "1.91"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }

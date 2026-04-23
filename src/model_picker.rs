@@ -160,14 +160,12 @@ impl ModelPickerState {
 /// Handle key input for the model picker.
 pub fn handle_picker_input(state: &mut ModelPickerState, key: KeyCode) -> PickerAction {
     match key {
-        KeyCode::Up
-            if state.cursor > 0 => {
-                state.cursor -= 1;
-            }
-        KeyCode::Down
-            if state.cursor + 1 < state.available_models.len() => {
-                state.cursor += 1;
-            }
+        KeyCode::Up if state.cursor > 0 => {
+            state.cursor -= 1;
+        }
+        KeyCode::Down if state.cursor + 1 < state.available_models.len() => {
+            state.cursor += 1;
+        }
         KeyCode::Enter => {
             state.roles[state.active_role].selected_index = state.cursor;
             if state.active_role + 1 < state.roles.len() {

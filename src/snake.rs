@@ -173,22 +173,18 @@ impl SnakeGame {
                 self.stop_music();
                 return true;
             }
-            KeyCode::Up | KeyCode::Char('w')
-                if self.direction != Direction::Down => {
-                    self.next_direction = Direction::Up;
-                }
-            KeyCode::Down | KeyCode::Char('s')
-                if self.direction != Direction::Up => {
-                    self.next_direction = Direction::Down;
-                }
-            KeyCode::Left | KeyCode::Char('a')
-                if self.direction != Direction::Right => {
-                    self.next_direction = Direction::Left;
-                }
-            KeyCode::Right | KeyCode::Char('d')
-                if self.direction != Direction::Left => {
-                    self.next_direction = Direction::Right;
-                }
+            KeyCode::Up | KeyCode::Char('w') if self.direction != Direction::Down => {
+                self.next_direction = Direction::Up;
+            }
+            KeyCode::Down | KeyCode::Char('s') if self.direction != Direction::Up => {
+                self.next_direction = Direction::Down;
+            }
+            KeyCode::Left | KeyCode::Char('a') if self.direction != Direction::Right => {
+                self.next_direction = Direction::Left;
+            }
+            KeyCode::Right | KeyCode::Char('d') if self.direction != Direction::Left => {
+                self.next_direction = Direction::Right;
+            }
             KeyCode::Enter if self.game_over => {
                 let hs = self.high_score.max(self.score);
                 *self = SnakeGame::new();
