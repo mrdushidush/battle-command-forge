@@ -23,7 +23,7 @@ battlecommand-forge mission "Build a FastAPI auth service with JWT and role-base
 
 **Narrator:** "Every AI coding tool generates code and hopes for the best. This one has a 9-stage quality pipeline. Watch."
 
-**Text overlay (bottom-right, subtle):** `battlecommand.dev`
+**Text overlay (bottom-right, subtle):** `github.com/mrdushidush/battle-command-forge`
 
 **Hit Enter. The pipeline starts streaming.**
 
@@ -140,8 +140,8 @@ https://github.com/mrdushidush/battle-command-forge
 
 **Text overlay (centered, large, hold for 5 seconds):**
 ```
-battlecommand.dev
-First 1,000 founding members: $15 lifetime v1.x updates
+github.com/mrdushidush/battle-command-forge
+Apache-2.0 — free to use, modify, ship
 ```
 
 **Fade to black.**

@@ -39,6 +39,5 @@ It mixes local and cloud models per pipeline role. The coder runs on a local 80B
 This is the only tool I know of that won't ship your code unless it passes a quality gate. Most of the time it doesn't pass -- and that's the point. It keeps iterating until it does.
 
 GitHub: https://github.com/mrdushidush/battle-command-forge
-Site: https://battlecommand.dev
 
 Happy to answer questions about the pipeline, model selection, or why surgical fixes beat full regeneration.

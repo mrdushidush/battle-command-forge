@@ -70,7 +70,7 @@ That's it. Your generated project is in `output/`.
 
 | Requirement | Version | Why |
 |-------------|---------|-----|
-| **Rust** | 1.75+ | Building the binary |
+| **Rust** | 1.91+ | Building the binary |
 | **Ollama** | Latest | Running local models |
 | **Python** | 3.10+ | Generated code + verifier (creates venvs) |
 
@@ -856,7 +856,7 @@ curl http://<remote-ip>:11434/api/tags
 
 ```bash
 rustup update
-# Needs Rust 1.75+
+# Needs Rust 1.91+
 ```
 
 ### High API costs

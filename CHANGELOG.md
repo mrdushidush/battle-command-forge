@@ -34,7 +34,6 @@ Initial public release. This is a port of internal pipeline work that was develo
 
 - **CLAUDE.md** — developer guide with pipeline internals, model benchmark tables, 29 numbered learnings from the internal development period, TUI polish history, key design decisions.
 - **BMORE.md** — extended architecture notes.
-- **ROADMAP-ENTERPRISE.md** — possible enterprise directions (not committed; published as reference).
 - **site/SHOW-HN.md** — draft HN submission when/if a public launch is staged.
 - **site/DEMO-SCRIPT.md** — demo walkthrough script.
 

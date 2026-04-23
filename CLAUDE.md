@@ -385,4 +385,4 @@ cargo build --release   # ~3.7 MB binary (LTO + strip)
 cargo test              # unit tests (86 tests)
 ```
 
-Requires: Rust 1.75+, Ollama running (`ollama serve`), optionally `ANTHROPIC_API_KEY`.
+Requires: Rust 1.91+, Ollama running (`ollama serve`), optionally `ANTHROPIC_API_KEY`.

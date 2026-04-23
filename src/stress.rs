@@ -1,4 +1,4 @@
-//! Stress test suite — 23 graded tasks (C4-C9) ported from battleclaw-v2.
+//! Stress test suite — 21 graded tasks (C4-C9) ported from battleclaw-v2.
 //!
 //! Tests the system's code generation quality across increasing complexity.
 
