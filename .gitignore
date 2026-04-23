@@ -1,0 +1,10 @@
+/target
+/output
+*.swp
+*.swo
+.DS_Store
+.env
+
+# Runtime user state — app creates these on demand, nothing in-repo
+.battlecommand/
+.grok/
