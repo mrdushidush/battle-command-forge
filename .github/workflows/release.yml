@@ -94,7 +94,7 @@ jobs:
           if [ $rc -eq 0 ]; then
             exit 0
           fi
-          if echo "$out" | grep -q "is already uploaded"; then
+          if echo "$out" | grep -qE "(is already uploaded|already exists on crates\.io index)"; then
             echo "::notice::version already on crates.io — skipping (idempotent)"
             exit 0
           fi
