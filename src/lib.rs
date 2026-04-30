@@ -43,6 +43,7 @@ pub mod models;
 pub mod report;
 pub mod router;
 pub mod sandbox;
+pub mod secrets;
 pub mod snake;
 pub mod space;
 pub mod stress;

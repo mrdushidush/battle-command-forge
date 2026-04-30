@@ -7,15 +7,54 @@ use std::time::{Duration, Instant};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
-/// Patterns for env vars that must be stripped from subprocesses.
-const SENSITIVE_ENV_PATTERNS: &[&str] = &[
-    "API_KEY",
-    "SECRET",
-    "TOKEN",
-    "PRIVATE_KEY",
-    "PASSWORD",
-    "CREDENTIAL",
+/// Allowlist of env-var names passed to subprocesses. Anything not on
+/// this list (or matching one of the prefix patterns below) is stripped
+/// before exec. The previous substring blocklist missed several real
+/// leak surfaces (`OLLAMA_HOST`, `DATABASE_URL`, `KUBECONFIG`,
+/// `AWS_ACCESS_KEY_ID`, `SSH_AUTH_SOCK`, …); allowlist semantics close
+/// the class.
+const ALLOWED_ENV_NAMES: &[&str] = &[
+    // Universal essentials
+    "PATH",
+    "HOME",
+    "USER",
+    "SHELL",
+    "LANG",
+    "TZ",
+    "TERM",
+    "TMPDIR",
+    "TMP",
+    "TEMP",
+    // Python/venv
+    "VIRTUAL_ENV",
+    "PYTHONUNBUFFERED",
+    "PYTHONDONTWRITEBYTECODE",
+    // Windows essentials (without these, child processes fail to start)
+    "USERNAME",
+    "USERPROFILE",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "SYSTEMROOT",
+    "SYSTEMDRIVE",
+    "WINDIR",
+    "COMSPEC",
+    "PROCESSOR_ARCHITECTURE",
+    "PROCESSOR_IDENTIFIER",
+    "NUMBER_OF_PROCESSORS",
+    "OS",
+    "PATHEXT",
 ];
+
+/// Env-var name prefixes that are always allowed (locale family).
+const ALLOWED_ENV_PREFIXES: &[&str] = &["LC_"];
+
+fn is_allowed_env_name(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    if ALLOWED_ENV_NAMES.iter().any(|n| *n == upper) {
+        return true;
+    }
+    ALLOWED_ENV_PREFIXES.iter().any(|p| upper.starts_with(p))
+}
 
 /// Result of running an external tool.
 #[derive(Debug)]
@@ -56,12 +95,16 @@ pub fn run_tool_with_timeout(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    // Strip all env vars matching sensitive patterns
-    for (key, _) in std::env::vars() {
-        let upper = key.to_uppercase();
-        if SENSITIVE_ENV_PATTERNS.iter().any(|p| upper.contains(p)) {
-            cmd.env_remove(&key);
-        }
+    // Strip env to allowlist. We snapshot the parent env, env_clear() the
+    // child, then re-add only the entries that pass `is_allowed_env_name`.
+    // Anything else (API keys, tokens, OLLAMA_HOST, DATABASE_URL,
+    // KUBECONFIG, SSH_AUTH_SOCK, …) is dropped.
+    let allowed: Vec<(String, String)> = std::env::vars()
+        .filter(|(k, _)| is_allowed_env_name(k))
+        .collect();
+    cmd.env_clear();
+    for (k, v) in allowed {
+        cmd.env(k, v);
     }
 
     let mut child = match cmd.spawn() {
@@ -139,23 +182,84 @@ pub fn run_tool_sandboxed(
     run_tool_with_timeout("sandbox-exec", &sbox_args, cwd, timeout_secs)
 }
 
-/// Validate that a relative path stays within root directory.
-/// Rejects path traversal (../), absolute paths, and null bytes.
+/// Validate that a relative path stays within `root`.
+///
+/// Rejects: parent-dir traversal (`..` as a path component, not as a
+/// substring — so `file..py` is allowed), absolute paths, drive-letter
+/// prefixes, leading separators, null bytes, and (when `root` exists)
+/// any path whose canonical form escapes `root` via a planted symlink.
 pub fn validate_path_within(root: &Path, relative: &str) -> Result<std::path::PathBuf, String> {
-    let relative = relative.trim();
-    if relative.contains("..")
-        || relative.starts_with('/')
-        || relative.starts_with('\\')
-        || relative.contains('\0')
-    {
-        return Err(format!("Unsafe path rejected: {}", relative));
+    use std::path::Component;
+
+    let trimmed = relative.trim();
+    if trimmed.is_empty() {
+        return Err("Empty path".to_string());
     }
-    let joined = root.join(relative);
-    let abs_root = std::path::absolute(root).unwrap_or(root.to_path_buf());
-    let abs_joined = std::path::absolute(&joined).unwrap_or(joined.clone());
-    if !abs_joined.starts_with(&abs_root) {
-        return Err(format!("Path escapes root directory: {}", relative));
+    if trimmed.contains('\0') {
+        return Err(format!("Null byte in path: {:?}", trimmed));
     }
+    if trimmed.starts_with('/') || trimmed.starts_with('\\') {
+        return Err(format!("Absolute path rejected: {}", trimmed));
+    }
+    // Windows drive letter, e.g. "C:foo" or "C:\foo", on any platform.
+    let bytes = trimmed.as_bytes();
+    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        return Err(format!("Drive-letter path rejected: {}", trimmed));
+    }
+
+    let rel_path = Path::new(trimmed);
+    if rel_path.is_absolute() {
+        return Err(format!("Absolute path rejected: {}", trimmed));
+    }
+    for comp in rel_path.components() {
+        match comp {
+            Component::ParentDir => {
+                return Err(format!("Parent-dir traversal rejected: {}", trimmed));
+            }
+            Component::Prefix(_) | Component::RootDir => {
+                return Err(format!("Absolute or prefixed path rejected: {}", trimmed));
+            }
+            _ => {}
+        }
+    }
+
+    let joined = root.join(rel_path);
+
+    // If root doesn't exist on the filesystem, no symlink can have been
+    // planted inside it — the lexical check above is sufficient.
+    let canon_root = match std::fs::canonicalize(root) {
+        Ok(c) => c,
+        Err(_) => return Ok(joined),
+    };
+
+    // For write targets that don't exist yet, walk up to the deepest
+    // existing ancestor and canonicalize that. starts_with on the
+    // canonical ancestor catches a symlink anywhere in the chain.
+    let canon_joined = match std::fs::canonicalize(&joined) {
+        Ok(c) => c,
+        Err(_) => {
+            let mut probe = joined.clone();
+            loop {
+                match probe.parent() {
+                    Some(parent) if parent != probe => {
+                        probe = parent.to_path_buf();
+                        if let Ok(c) = std::fs::canonicalize(&probe) {
+                            break c;
+                        }
+                    }
+                    _ => return Ok(joined),
+                }
+            }
+        }
+    };
+
+    if !canon_joined.starts_with(&canon_root) {
+        return Err(format!(
+            "Path escapes root directory (symlink?): {}",
+            trimmed
+        ));
+    }
+
     Ok(joined)
 }
 
@@ -386,5 +490,88 @@ mod tests {
         let result = run_tool_with_timeout("sleep", &["30"], std::path::Path::new("/tmp"), 2);
         assert!(result.timed_out, "Process should have timed out");
         assert!(!result.success);
+    }
+
+    // Regression: the previous validator rejected `..` as a substring,
+    // false-positive-blocking legitimate filenames.
+    #[test]
+    fn test_validate_path_dotdot_in_filename_allowed() {
+        let root = std::path::Path::new("/tmp/test_root");
+        assert!(validate_path_within(root, "file..py").is_ok());
+        assert!(validate_path_within(root, "a..b.txt").is_ok());
+        assert!(validate_path_within(root, "my.backup..tar").is_ok());
+    }
+
+    // Regression: prior validator missed Windows drive prefixes on Linux
+    // (`C:\foo` slipped through `contains("..")`).
+    #[test]
+    fn test_validate_path_windows_drive_rejected() {
+        let root = std::path::Path::new("/tmp/test_root");
+        assert!(validate_path_within(root, "C:\\windows\\system32").is_err());
+        assert!(validate_path_within(root, "D:foo").is_err());
+    }
+
+    // Regression: a planted symlink inside root pointing outside should
+    // be detected via canonicalize. Unix-only because we use the unix
+    // symlink primitive.
+    #[cfg(unix)]
+    #[test]
+    fn test_validate_path_symlink_escape_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!("bcf-symlink-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let link = root.join("escape");
+        let _ = std::fs::remove_file(&link);
+        symlink("/etc", &link).unwrap();
+
+        // Reading the symlinked target via `escape/passwd` would canonicalize
+        // outside root — that must fail.
+        let result = validate_path_within(&root, "escape/passwd");
+        assert!(
+            result.is_err(),
+            "planted-symlink escape should be rejected, got Ok({:?})",
+            result
+        );
+
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_dir(&root);
+    }
+
+    // Allowlist drift detector — fails loudly if someone removes an
+    // expected-allowed env or un-strips a sensitive one.
+    #[test]
+    fn test_env_allowlist_keeps_essentials() {
+        assert!(is_allowed_env_name("PATH"));
+        assert!(is_allowed_env_name("HOME"));
+        assert!(is_allowed_env_name("USER"));
+        assert!(is_allowed_env_name("VIRTUAL_ENV"));
+        assert!(is_allowed_env_name("LC_ALL"));
+        assert!(is_allowed_env_name("LC_CTYPE"));
+        // Case-insensitive
+        assert!(is_allowed_env_name("path"));
+    }
+
+    #[test]
+    fn test_env_allowlist_blocks_known_secrets() {
+        // Provider API keys
+        assert!(!is_allowed_env_name("ANTHROPIC_API_KEY"));
+        assert!(!is_allowed_env_name("XAI_API_KEY"));
+        assert!(!is_allowed_env_name("BRAVE_API_KEY"));
+        assert!(!is_allowed_env_name("OPENAI_API_KEY"));
+        assert!(!is_allowed_env_name("GH_TOKEN"));
+        assert!(!is_allowed_env_name("GITHUB_TOKEN"));
+        assert!(!is_allowed_env_name("HF_TOKEN"));
+        // Cloud creds (the substring blocklist missed these)
+        assert!(!is_allowed_env_name("AWS_ACCESS_KEY_ID"));
+        assert!(!is_allowed_env_name("AWS_SECRET_ACCESS_KEY"));
+        // Network pivots / metadata
+        assert!(!is_allowed_env_name("OLLAMA_HOST"));
+        assert!(!is_allowed_env_name("KUBECONFIG"));
+        assert!(!is_allowed_env_name("SSH_AUTH_SOCK"));
+        // Database URLs (often embed credentials)
+        assert!(!is_allowed_env_name("DATABASE_URL"));
+        assert!(!is_allowed_env_name("POSTGRES_URL"));
+        assert!(!is_allowed_env_name("REDIS_URL"));
     }
 }

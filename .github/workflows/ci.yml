@@ -6,50 +6,109 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Default-deny everything; jobs that need more must opt in explicitly.
+# Keeps a compromised third-party action from minting tokens with write
+# scope on this repo.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
+# Third-party actions are SHA-pinned with a `# vX.Y.Z` comment so
+# dependabot can update both atomically. dtolnay/rust-toolchain is left
+# at @stable on purpose: it is a rolling alias that re-points each
+# Rust release, and pinning would defeat its function. The action is
+# small, single-author, widely used, and lives one trust hop above
+# rustup itself.
 jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
-
-      - name: Build
-        run: cargo build --release
-
-      - name: Test
-        run: cargo test
-
-      - name: Clippy
-        run: cargo clippy -- -D warnings
-
   fmt:
+    name: rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+      - run: cargo fmt --all --check
 
-      - name: Format check
-        run: cargo fmt -- --check
+  clippy:
+    name: clippy (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2.9.1
+      - run: cargo clippy --all-targets --no-deps --locked -- -D warnings
+
+  audit:
+    name: cargo audit (RustSec advisories)
+    runs-on: ubuntu-latest
+    # rustsec/audit-check posts annotations as a check run, which needs
+    # checks:write. Default-deny at workflow level zeros everything not
+    # listed, so we must opt in here.
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998  # v2.0.0
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  test:
+    name: test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2.9.1
+      - run: cargo test --lib --bins --locked
+
+  build:
+    name: release build (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2.9.1
+      - run: cargo build --release --locked
+
+  msrv:
+    name: MSRV (Rust ${{ env.MSRV }})
+    runs-on: ubuntu-latest
+    # Rust version declared in Cargo.toml `rust-version`. Verified here so
+    # the claim doesn't drift — if a dep starts requiring a newer Rust,
+    # this job goes red and we either bump MSRV in Cargo.toml or pin the
+    # dep back. Build-only (not test) keeps the job under a minute; the
+    # claim is "this version compiles BCF," not "this version runs the
+    # full suite."
+    env:
+      MSRV: "1.95"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.MSRV }}
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2.9.1
+        with:
+          key: msrv
+      - run: cargo build --locked

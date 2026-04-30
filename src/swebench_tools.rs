@@ -40,11 +40,10 @@ pub async fn execute(tool_name: &str, args: &Value, workspace: &str) -> ToolResu
 }
 
 fn resolve_path(workspace: &str, relative: &str) -> Result<String, String> {
-    let cleaned = relative.trim_start_matches('/').trim_start_matches("./");
-    if cleaned.contains("..") {
-        return Err(format!("Path traversal not allowed: {}", relative));
-    }
-    Ok(format!("{}/{}", workspace.trim_end_matches('/'), cleaned))
+    let cleaned = relative.trim_start_matches("./");
+    let root = Path::new(workspace);
+    let joined = crate::sandbox::validate_path_within(root, cleaned)?;
+    Ok(joined.to_string_lossy().into_owned())
 }
 
 fn safe_truncate(s: &str, max: usize) -> &str {
@@ -300,6 +299,45 @@ async fn execute_list_directory(args: &Value, workspace: &str) -> ToolResult {
     }
 }
 
+/// Programs the ReAct agent is allowed to invoke. Any new entry is a
+/// deliberate security decision — keep this list tight.
+const ALLOWED_RUN_COMMAND_HEADS: &[&str] = &[
+    "pytest",
+    "python",
+    "python3",
+    "pip",
+    "pip3",
+    "uv",
+    "ruff",
+    "black",
+    "mypy",
+    "tox",
+    "pre-commit",
+    "ls",
+    "cat",
+    "head",
+    "tail",
+    "grep",
+    "find",
+    "wc",
+    "echo",
+    "true",
+    "false",
+    "test",
+    "mkdir",
+    "rmdir",
+    "rm",
+    "touch",
+    "cp",
+    "mv",
+    "git",
+    "make",
+    "cargo",
+    "npm",
+    "yarn",
+    "node",
+];
+
 async fn execute_run_command(args: &Value, workspace: &str) -> ToolResult {
     let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
     if cmd.is_empty() {
@@ -312,27 +350,79 @@ async fn execute_run_command(args: &Value, workspace: &str) -> ToolResult {
         };
     }
 
-    // Auto-replace python → python3
-    let cmd = cmd
-        .replace("python ", "python3 ")
-        .replace("python\n", "python3\n");
-    let cmd = if cmd == "python" {
-        "python3".to_string()
-    } else {
-        cmd
+    // Parse argv with shell quoting rules. We do NOT pass to `sh -c` — running
+    // direct via Command::new(argv[0]).args(argv[1..]) means shell substitution
+    // (`$(...)`, backticks, `&&`, `|`, redirects) is never interpreted, which
+    // closes the substring-blocklist bypass class outright.
+    let mut argv: Vec<String> = match shell_words::split(cmd) {
+        Ok(v) if !v.is_empty() => v,
+        Ok(_) => {
+            return ToolResult {
+                tool_name: "run_command".into(),
+                content: "Error: empty command after parsing".into(),
+                success: false,
+                is_write: false,
+                is_submit: false,
+            };
+        }
+        Err(e) => {
+            return ToolResult {
+                tool_name: "run_command".into(),
+                content: format!(
+                    "Error: cannot parse command (use simple argv form, no unbalanced quotes): {}",
+                    e
+                ),
+                success: false,
+                is_write: false,
+                is_submit: false,
+            };
+        }
     };
 
-    // Block dangerous commands
-    let cmd_lower = cmd.to_lowercase();
-    if cmd_lower.contains("rm -rf /")
-        || cmd_lower.contains("shutdown")
-        || cmd_lower.contains("reboot")
-        || cmd_lower.contains("mkfs")
-        || cmd_lower.contains("> /dev/")
-    {
+    // Reject shell-composition tokens. They would only have meaning under
+    // `sh -c`; here they'd just be passed as literal args and confuse the
+    // child. Failing loudly is friendlier than silently misexecuting.
+    for token in &argv {
+        if matches!(
+            token.as_str(),
+            "&&" | "||" | ";" | "|" | ">" | ">>" | "<" | "<<" | "&"
+        ) {
+            return ToolResult {
+                tool_name: "run_command".into(),
+                content: format!(
+                    "Error: shell metacharacter '{}' is not supported. Run as separate commands.",
+                    token
+                ),
+                success: false,
+                is_write: false,
+                is_submit: false,
+            };
+        }
+        if token.contains('\0') {
+            return ToolResult {
+                tool_name: "run_command".into(),
+                content: "Error: null byte in argument".into(),
+                success: false,
+                is_write: false,
+                is_submit: false,
+            };
+        }
+    }
+
+    // python → python3 only when argv[0] is exactly the bare interpreter.
+    // The old substring-replace corrupted strings like `pythonic_test_file`.
+    if argv[0] == "python" {
+        argv[0] = "python3".to_string();
+    }
+
+    let head = argv[0].clone();
+    if !ALLOWED_RUN_COMMAND_HEADS.iter().any(|a| *a == head) {
         return ToolResult {
             tool_name: "run_command".into(),
-            content: "Error: dangerous command blocked".into(),
+            content: format!(
+                "Error: program '{}' is not in the allowlist. Edit ALLOWED_RUN_COMMAND_HEADS in swebench_tools.rs to permit it.",
+                head
+            ),
             success: false,
             is_write: false,
             is_submit: false,
@@ -341,9 +431,8 @@ async fn execute_run_command(args: &Value, workspace: &str) -> ToolResult {
 
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(COMMAND_TIMEOUT_SECS),
-        tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg(&cmd)
+        tokio::process::Command::new(&head)
+            .args(&argv[1..])
             .current_dir(workspace)
             .output(),
     )
@@ -549,5 +638,104 @@ fn execute_submit() -> ToolResult {
         success: true,
         is_write: false,
         is_submit: true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn run(cmd: &str) -> ToolResult {
+        let workspace = std::env::temp_dir()
+            .join(format!("bcf-sw-{}", std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        std::fs::create_dir_all(&workspace).ok();
+        let args = json!({"command": cmd});
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(execute_run_command(&args, &workspace))
+    }
+
+    // Regression: the old substring blocklist let `rm  -rf  /` (double
+    // space), `$(echo rm) -rf /`, and backticks slip through. The new
+    // implementation drops `sh -c` entirely so these literals would just
+    // be passed as arguments to programs that aren't allowlisted.
+    #[test]
+    fn test_run_command_rejects_command_substitution() {
+        let r = run("$(echo rm) -rf /");
+        assert!(!r.success);
+        // `$(echo` is not in the allowlist, so we get an allowlist error,
+        // not silent execution.
+        assert!(
+            r.content.contains("allowlist") || r.content.contains("metacharacter"),
+            "unexpected error: {}",
+            r.content
+        );
+    }
+
+    #[test]
+    fn test_run_command_rejects_compound_metachars() {
+        for cmd in &["echo a && echo b", "echo a ; echo b", "echo a | grep b"] {
+            let r = run(cmd);
+            assert!(!r.success, "should have rejected: {}", cmd);
+            assert!(
+                r.content.contains("metacharacter"),
+                "expected metachar error for {:?}, got: {}",
+                cmd,
+                r.content
+            );
+        }
+    }
+
+    #[test]
+    fn test_run_command_rejects_unallowlisted_head() {
+        let r = run("curl http://example.com");
+        assert!(!r.success);
+        assert!(r.content.contains("allowlist"), "got: {}", r.content);
+    }
+
+    #[test]
+    fn test_run_command_python_rewrite_only_for_bare_head() {
+        // `python` head → rewritten to python3 (then either runs or
+        // fails-to-spawn; we don't care about exit, just that the
+        // allowlist accepted it without rejecting the head).
+        let r = run("python --version");
+        assert!(
+            !r.content.contains("not in the allowlist"),
+            "python head should pass allowlist after rewrite: {}",
+            r.content
+        );
+
+        // A token containing the substring `python ` should NOT be
+        // rewritten — the old `cmd.replace("python ", ...)` corrupted
+        // strings like `pythonic_test_file`. Now: the head is `echo`,
+        // and `pythonic_test_file` is just an arg literal.
+        let r = run("echo pythonic_test_file");
+        assert!(
+            !r.content.contains("python3ic"),
+            "python rewrite should not corrupt non-head tokens: {}",
+            r.content
+        );
+    }
+
+    #[test]
+    fn test_resolve_path_filename_with_dotdot_allowed() {
+        // Old resolve_path rejected `file..py` via `contains("..")`.
+        // New impl delegates to validate_path_within which uses
+        // Component-walk and allows it.
+        let r = resolve_path("/tmp/wsroot", "file..py");
+        assert!(
+            r.is_ok(),
+            "filename with double-dots should be allowed, got {:?}",
+            r
+        );
+    }
+
+    #[test]
+    fn test_resolve_path_blocks_real_traversal() {
+        assert!(resolve_path("/tmp/wsroot", "../etc/passwd").is_err());
+        assert!(resolve_path("/tmp/wsroot", "app/../../etc/shadow").is_err());
+        assert!(resolve_path("/tmp/wsroot", "/etc/passwd").is_err());
     }
 }

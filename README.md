@@ -1,5 +1,10 @@
 # BattleCommand Forge
 
+[![CI](https://github.com/mrdushidush/battle-command-forge/actions/workflows/ci.yml/badge.svg)](https://github.com/mrdushidush/battle-command-forge/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/battlecommand-forge.svg)](https://crates.io/crates/battlecommand-forge)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![MSRV](https://img.shields.io/badge/rustc-1.95%2B-orange.svg)](Cargo.toml)
+
 > **Status: stable port at v0.1.0 (April 2026).** Battle-command-forge is the quality-first code-generation branch of an AI-agent project family I've been building since January 2026. This release is a public port of internal pipeline work — the code is field-tested (86/86 unit tests, plus the 10-mission stress suite documented below) but active feature development has slowed while I focus on sibling projects in the same family. Issues and PRs remain welcome. Related: **[claudette](https://github.com/mrdushidush/claudette)** (local-first personal assistant, on crates.io) · **[ABCC](https://github.com/mrdushidush/agent-battle-command-center)** (the godfather — RTS-style TUI for agent orchestration).
 
 **Quality-first AI coding army.** A pure Rust single binary (~3.7 MB) that generates production-grade code using a 9-stage quality pipeline with TDD enforcement, multi-file extraction, surgical fix-pass retry, and a complexity-scaled quality gate.
@@ -289,7 +294,7 @@ Launching mission: Build a WebSocket chat server...
 battlecommand-forge tui
 ```
 
-Full-featured 6-tab interface with CTO research chat, model picker, hardware monitoring, and 14 slash commands. See [Interactive TUI](#interactive-tui) for details.
+Full-featured 6-tab interface with CTO research chat, model picker, hardware monitoring, and 15 slash commands. See [Interactive TUI](#interactive-tui) for details.
 
 ### `edit` — Modify Existing Code
 

@@ -50,6 +50,9 @@ pub enum TuiEvent {
 }
 
 const MAX_FIX_ROUNDS: usize = 5;
+// Compile-time invariant — guarantees the fix-round loop runs at least once,
+// which in turn means `best_result` is Some by the time the loop exits.
+const _: () = assert!(MAX_FIX_ROUNDS >= 1, "MAX_FIX_ROUNDS must be >= 1");
 
 /// Quality gate threshold scaled by complexity.
 /// C1-C6: 9.2 (achievable with good models)
@@ -706,8 +709,16 @@ impl MissionRunner {
             voice::fix_round(round + 2, MAX_FIX_ROUNDS);
         }
 
-        // Should only reach here if all rounds exhausted without accept/abort
-        let best = best_result.expect("BUG: no rounds completed — MAX_FIX_ROUNDS must be >= 1");
+        // Should only reach here if all rounds exhausted without accept/abort.
+        // `best_result` is unconditionally set on iteration 0 of the fix-round
+        // loop (see `improved` initialization above) and the compile-time
+        // assertion on `MAX_FIX_ROUNDS` guarantees iteration 0 runs — so this
+        // None branch is unreachable. We surface a real error rather than
+        // panicking just in case future refactors change the loop shape.
+        let best = match best_result {
+            Some(b) => b,
+            None => return Err(anyhow::anyhow!("Pipeline produced no rounds")),
+        };
         println!();
         println!(
             "All {} fix rounds exhausted (best: {:.1}/10, round {})",

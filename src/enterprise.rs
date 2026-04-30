@@ -35,13 +35,9 @@ pub fn audit_log(action: &str, resource: &str, details: &str) -> Result<()> {
 
     let json = serde_json::to_string(&entry)?;
 
-    if let Some(parent) = Path::new(AUDIT_LOG).parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(AUDIT_LOG)?;
+    let path = Path::new(AUDIT_LOG);
+    crate::secrets::ensure_secret_file(path)?;
+    let mut file = fs::OpenOptions::new().append(true).open(path)?;
     writeln!(file, "{}", json)?;
     Ok(())
 }
@@ -118,13 +114,9 @@ pub fn log_cost(
 
     let json = serde_json::to_string(&entry)?;
 
-    if let Some(parent) = Path::new(COSTS_LOG).parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(COSTS_LOG)?;
+    let path = Path::new(COSTS_LOG);
+    crate::secrets::ensure_secret_file(path)?;
+    let mut file = fs::OpenOptions::new().append(true).open(path)?;
     writeln!(file, "{}", json)?;
     Ok(())
 }

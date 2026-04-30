@@ -1349,15 +1349,15 @@ mod tests {
         // Just verify they construct without panic
         match token {
             StreamEvent::Token(t) => assert_eq!(t, "hello"),
-            _ => panic!(),
+            other => unreachable!("unexpected variant: {:?}", other),
         }
         match done {
             StreamEvent::Done(t) => assert_eq!(t, "full text"),
-            _ => panic!(),
+            other => unreachable!("unexpected variant: {:?}", other),
         }
         match err {
             StreamEvent::Error(t) => assert_eq!(t, "oops"),
-            _ => panic!(),
+            other => unreachable!("unexpected variant: {:?}", other),
         }
     }
 }
